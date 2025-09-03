@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, ref, watch, nextTick } from "vue";
-import { runEngine, testEngine } from "@/services/fiverr_engine_v1.js";
+// import { runEngine, testEngine } from "@/services/fiverr_engine_v1.js";
+import { runEngine } from "@/services/golden_era.js";
 
 // Props
 const props = defineProps({
@@ -40,10 +41,9 @@ function clearOverlays() {
 // Draw overlays
 function draw(result, candles) {
   if (!chart || !LightweightCharts) return;
-
   clearOverlays();
 
-  // 1. Levels of Interest
+  // 1. Levels of Interest (Support/Resistance)
   const lastLvl = result.levelsHistory?.at(-1);
   if (lastLvl) {
     try {
@@ -58,45 +58,61 @@ function draw(result, candles) {
         { time: candles[0].time, value: lastLvl.curr_level_bot },
         { time: candles.at(-1).time, value: lastLvl.curr_level_bot },
       ]);
+
       overlaySeries.push(topLine, botLine);
     } catch (err) {
       console.warn("Could not draw levels:", err);
     }
   }
 
-  // 2. Entry Zones
+  // 2. Entry Zones (yellow filled rectangle)
   result.events
     ?.filter((e) => e.type.includes("entry_zone"))
     .forEach((e) => {
       if (e.box) {
         try {
-          const top = chart.addLineSeries({ color: "yellow", lineWidth: 2 });
-          const bot = chart.addLineSeries({ color: "yellow", lineWidth: 2 });
+          const top = e.box.top;
+          const bottom = e.box.bottom;
+          const left = candles[e.box.leftIndex].time;
+          const right =
+            candles[Math.min(e.box.rightIndex, candles.length - 1)].time;
 
-          top.setData([
-            { time: candles[e.box.leftIndex].time, value: e.box.top },
-            {
-              time: candles[Math.min(e.box.rightIndex, candles.length - 1)]
-                .time,
-              value: e.box.top,
-            },
+          const areaSeries = chart.addAreaSeries({
+            topColor: "rgba(255, 255, 0, 0.25)", // light yellow transparent
+            bottomColor: "rgba(255, 255, 0, 0.25)",
+            lineColor: "yellow",
+            lineWidth: 1,
+          });
+
+          areaSeries.setData([
+            { time: left, value: top },
+            { time: right, value: top },
+            { time: right, value: bottom },
+            { time: left, value: bottom },
           ]);
-          bot.setData([
-            { time: candles[e.box.leftIndex].time, value: e.box.bottom },
-            {
-              time: candles[Math.min(e.box.rightIndex, candles.length - 1)]
-                .time,
-              value: e.box.bottom,
-            },
-          ]);
-          overlaySeries.push(top, bot);
+
+          overlaySeries.push(areaSeries);
         } catch (err) {
           console.warn("Could not draw entry zone:", err);
         }
       }
     });
 
-  // 3. Open Position
+  // 3. Invalidation Zone (red line or filled box)
+  if (result.invalidation) {
+    try {
+      const invLine = chart.addLineSeries({ color: "red", lineWidth: 2 });
+      invLine.setData([
+        { time: candles[0].time, value: result.invalidation },
+        { time: candles.at(-1).time, value: result.invalidation },
+      ]);
+      overlaySeries.push(invLine);
+    } catch (err) {
+      console.warn("Could not draw invalidation zone:", err);
+    }
+  }
+
+  // 4. Active Position Levels (entry, SL, TP1, TP2)
   if (result.openPosition) {
     const pos = result.openPosition;
     const levels = [
@@ -115,6 +131,33 @@ function draw(result, candles) {
         overlaySeries.push(line);
       } catch (err) {
         console.warn("Could not draw position level:", err);
+      }
+    });
+  }
+
+  // 5. Fibonacci Retracement (38.2%, 50%, 61.8%)
+  if (result.fib) {
+    const { high, low } = result.fib;
+    const levels = [
+      { perc: 0.382, color: "#3cb371" },
+      { perc: 0.5, color: "#808080" },
+      { perc: 0.618, color: "#ff8c00" },
+    ];
+
+    levels.forEach((lvl) => {
+      const price = high - (high - low) * lvl.perc;
+      try {
+        const fibLine = chart.addLineSeries({
+          color: lvl.color,
+          lineWidth: 1,
+        });
+        fibLine.setData([
+          { time: candles[0].time, value: price },
+          { time: candles.at(-1).time, value: price },
+        ]);
+        overlaySeries.push(fibLine);
+      } catch (err) {
+        console.warn("Could not draw fib level:", err);
       }
     });
   }
@@ -177,24 +220,8 @@ async function initializeChart() {
       updateChartData(props.candles);
     }
   } catch (error) {
-    console.error("Failed to initialize chart:", error);
-
-    // Fallback: Create a simple HTML canvas chart
-    createFallbackChart();
+    console.log(error);
   }
-}
-
-// Fallback chart using HTML5 Canvas
-function createFallbackChart() {
-  if (!chartContainer.value) return;
-
-  chartContainer.value.innerHTML = `
-    <canvas id="fallback-chart" width="600" height="400" style="border: 1px solid #ccc;">
-      Chart initialization failed. Please check your lightweight-charts installation.
-    </canvas>
-  `;
-
-  console.warn("Using fallback chart display");
 }
 
 function updateChartData(newCandles) {
@@ -250,7 +277,6 @@ watch(
 
 <template>
   <div class="chart-wrapper">
-    <h3>Gold Levels Chart</h3>
     <div class="chart-container">
       <div ref="chartContainer" class="chart-element"></div>
     </div>
